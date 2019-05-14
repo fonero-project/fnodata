@@ -1,4 +1,4 @@
-// Copyright (c) 2018, The Fonero developers
+// Copyright (c) 2018-2019, The Fonero developers
 // Copyright (c) 2017, The fnodata developers
 // See LICENSE for details.
 
@@ -13,33 +13,52 @@ import (
 	"strings"
 	"time"
 
+	apitypes "github.com/fonero-project/fnodata/api/types"
 	"github.com/fonero-project/fnodata/db/dbtypes"
+	"github.com/fonero-project/fnodata/explorer/types"
+	pstypes "github.com/fonero-project/fnodata/pubsub/types"
 	"golang.org/x/net/websocket"
 )
-
-// ErrWsClosed is the error message text used websocket Conn.Close tries to
-// close an already closed connection.
-var ErrWsClosed = "use of closed network connection"
 
 // RootWebsocket is the websocket handler for all pages
 func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 	wsHandler := websocket.Handler(func(ws *websocket.Conn) {
 		// Create channel to signal updated data availability
 		updateSig := make(hubSpoke, 3)
+		// Create a channel for exchange updates
+		xcChan := make(exchangeChannel, 3)
 		// register websocket client with our signal channel
-		clientData := exp.wsHub.RegisterClient(&updateSig)
+		clientData := exp.wsHub.RegisterClient(&updateSig, xcChan)
 		// unregister (and close signal channel) before return
 		defer exp.wsHub.UnregisterClient(&updateSig)
 
 		// close the websocket
 		closeWS := func() {
 			err := ws.Close()
-			// Do not log error if connection is just closed
-			if err != nil && !strings.Contains(err.Error(), ErrWsClosed) {
+			// Do not log error if connection is just closed.
+			if err != nil && !pstypes.IsWSClosedErr(err) &&
+				!pstypes.IsIOTimeoutErr(err) {
 				log.Errorf("Failed to close websocket: %v", err)
 			}
 		}
 		defer closeWS()
+
+		send := func(webData WebSocketMessage) error {
+			err := ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+			if err != nil && !pstypes.IsWSClosedErr(err) {
+				log.Warnf("SetWriteDeadline failed: %v", err)
+			}
+			if err := websocket.JSON.Send(ws, webData); err != nil {
+				// Do not log error if connection is just closed
+				if !pstypes.IsWSClosedErr(err) {
+					log.Debugf("Failed to send web socket message %s: %v", webData.EventId, err)
+				}
+				// If the send failed, the client is probably gone, so close
+				// the connection and quit.
+				return fmt.Errorf("Send fail")
+			}
+			return nil
+		}
 
 		requestLimit := 1 << 20
 		// set the max payload size to 1 MB
@@ -52,8 +71,11 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 			for {
 				// Wait to receive a message on the websocket
 				msg := &WebSocketMessage{}
-				ws.SetReadDeadline(time.Now().Add(wsReadTimeout))
-				if err := websocket.JSON.Receive(ws, &msg); err != nil {
+				err := ws.SetReadDeadline(time.Now().Add(wsReadTimeout))
+				if err != nil && !pstypes.IsWSClosedErr(err) {
+					log.Warnf("SetReadDeadline failed: %v", err)
+				}
+				if err = websocket.JSON.Receive(ws, &msg); err != nil {
 					if err.Error() != "EOF" {
 						log.Warnf("websocket client receive error: %v", err)
 					}
@@ -96,10 +118,38 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 					}
 
 				case "getmempooltxs":
+					// MempoolInfo. Used on mempool and home page.
+					inv := exp.MempoolInventory()
+
+					// Check if client supplied a mempool ID. If so, check that an update
+					// is needed before sending.
+					if msg.Message != "" {
+						clientID, err := strconv.ParseUint(msg.Message, 10, 64)
+						if err != nil {
+							// For now, just log a warning and return the mempool anyway.
+							log.Warn("Unable to parse supplied mempool ID %s", msg.Message)
+						} else if inv.ID() == clientID {
+							// Client is up-to-date. No need to send anything.
+							continue
+						}
+					}
+
+					inv.RLock()
+					msg, err := json.Marshal(inv)
+					inv.RUnlock()
+
+					if err != nil {
+						log.Warn("Invalid JSON message: ", err)
+						webData.Message = "Error: Could not encode JSON message"
+						break
+					}
+					webData.Message = string(msg)
+
+				case "getmempooltrimmed":
+					// TrimmedMempoolInfo. Used in nexthome.
 					// construct mempool object with properties required in template
-					mempoolInfo := exp.TrimmedMempoolInfo()
-					// mempool fees appear incorrect, temporarily set to zero for now
-					mempoolInfo.Fees = 0
+					inv := exp.MempoolInventory()
+					mempoolInfo := inv.Trim() // Trim internally locks the MempoolInfo.
 
 					exp.pageData.RLock()
 					mempoolInfo.Subsidy = exp.pageData.HomeInfo.NBlockSubsidy
@@ -116,11 +166,17 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 
 				case "getticketpooldata":
 					// Retrieve chart data on the given interval.
-					interval := dbtypes.ChartGroupingFromStr(msg.Message)
+					interval := dbtypes.TimeGroupingFromStr(msg.Message)
 					// Chart height is returned since the cache may be stale,
 					// although it is automatically updated by the first caller
 					// who requests data from a stale cache.
-					cData, gData, chartHeight, err := exp.explorerSource.TicketPoolVisualization(interval)
+					timeChart, priceChart, donutChart, chartHeight, err :=
+						exp.explorerSource.TicketPoolVisualization(interval)
+					if dbtypes.IsTimeoutErr(err) {
+						log.Warnf("TicketPoolVisualization DB timeout: %v", err)
+						webData.Message = "Error: DB timeout"
+						break
+					}
 					if err != nil {
 						if strings.HasPrefix(err.Error(), "unknown interval") {
 							log.Debugf("invalid ticket pool interval provided "+
@@ -133,27 +189,25 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 						break
 					}
 
-					var mp dbtypes.PoolTicketsData
-					exp.MempoolData.RLock()
-					if len(exp.MempoolData.Tickets) > 0 {
-						mp.Time = append(mp.Time, uint64(exp.MempoolData.Tickets[0].Time))
-						mp.Price = append(mp.Price, exp.MempoolData.Tickets[0].TotalOut)
-						mp.Mempool = append(mp.Mempool, uint64(len(exp.MempoolData.Tickets)))
+					mp := new(apitypes.PriceCountTime)
+
+					inv := exp.MempoolInventory()
+					inv.RLock()
+					if len(inv.Tickets) > 0 {
+						mp.Price = inv.Tickets[0].TotalOut
+						mp.Count = len(inv.Tickets)
+						mp.Time = dbtypes.NewTimeDefFromUNIX(inv.Tickets[0].Time)
 					} else {
 						log.Debug("No tickets exists in the mempool")
 					}
-					exp.MempoolData.RUnlock()
+					inv.RUnlock()
 
-					var data = struct {
-						ChartHeight uint64                     `json:"chartHeight"`
-						BarGraphs   []*dbtypes.PoolTicketsData `json:"barGraphs"`
-						DonutChart  *dbtypes.PoolTicketsData   `json:"donutChart"`
-						Mempool     *dbtypes.PoolTicketsData   `json:"mempool"`
-					}{
-						chartHeight,
-						cData,
-						gData,
-						&mp,
+					data := &apitypes.TicketPoolChartsData{
+						ChartHeight: uint64(chartHeight),
+						TimeChart:   timeChart,
+						PriceChart:  priceChart,
+						DonutChart:  donutChart,
+						Mempool:     mp,
 					}
 
 					msg, err := json.Marshal(data)
@@ -174,16 +228,8 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 
 				webData.EventId = msg.EventId + "Resp"
 
-				// send the response back on the websocket
-				ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
-				if err := websocket.JSON.Send(ws, webData); err != nil {
-					// Do not log error if connection is just closed
-					if !strings.Contains(err.Error(), ErrWsClosed) {
-						log.Debugf("Failed to encode WebSocketMessage (reply) %s: %v",
-							webData.EventId, err)
-					}
-					// If the send failed, the client is probably gone, so close
-					// the connection and quit.
+				err = send(webData)
+				if err != nil {
 					return
 				}
 			}
@@ -203,8 +249,9 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 					break loop
 				}
 
-				if _, ok = eventIDs[sig]; !ok {
-					break loop
+				if !sig.IsValid() {
+					log.Errorf("invalid signal to send: %s / %d", sig.Signal.String(), int(sig.Signal))
+					continue
 				}
 
 				log.Tracef("signaling client: %p", &updateSig)
@@ -212,53 +259,92 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 				// Write block data to websocket client
 
 				webData := WebSocketMessage{
-					EventId: eventIDs[sig],
+					// Use HubSignal's string, not HubMessage's string, which is decorated.
+					EventId: sig.Signal.String(),
+					Message: "error",
 				}
 				buff := new(bytes.Buffer)
 				enc := json.NewEncoder(buff)
-				switch sig {
+				switch sig.Signal {
 				case sigNewBlock:
 					exp.pageData.RLock()
-					enc.Encode(WebsocketBlock{
+					err := enc.Encode(types.WebsocketBlock{
 						Block: exp.pageData.BlockInfo,
 						Extra: exp.pageData.HomeInfo,
 					})
 					exp.pageData.RUnlock()
+					if err == nil {
+						webData.Message = buff.String()
+					} else {
+						log.Errorf("json.Encode(WebsocketBlock) failed: %v", err)
+					}
 
-					webData.Message = buff.String()
 				case sigMempoolUpdate:
-					exp.MempoolData.RLock()
-					enc.Encode(exp.MempoolData.MempoolShort)
-					exp.MempoolData.RUnlock()
-					webData.Message = buff.String()
+					inv := exp.MempoolInventory()
+					inv.RLock()
+					err := enc.Encode(inv.MempoolShort)
+					inv.RUnlock()
+					if err == nil {
+						webData.Message = buff.String()
+					} else {
+						log.Errorf("json.Encode(MempoolShort) failed: %v", err)
+					}
+
 				case sigPingAndUserCount:
 					// ping and send user count
 					webData.Message = strconv.Itoa(exp.wsHub.NumClients())
-				case sigNewTx:
+				case sigNewTxs:
+					// Do not use any tx slice in sig.Msg. Instead use client's
+					// new transactions slice, newTxs.
 					clientData.RLock()
-					enc.Encode(clientData.newTxs)
+					err := enc.Encode(clientData.newTxs)
 					clientData.RUnlock()
-					webData.Message = buff.String()
+					if err == nil {
+						webData.Message = buff.String()
+					} else {
+						log.Errorf("json.Encode([]*MempoolTx) failed: %v", err)
+					}
+
 				case sigSyncStatus:
-					enc.Encode(SyncStatus())
-					webData.Message = buff.String()
+					err := enc.Encode(SyncStatus())
+					if err == nil {
+						webData.Message = buff.String()
+					} else {
+						log.Errorf("json.Encode([]SyncStatusInfo) failed: %v", err)
+					}
+
+				default:
+					log.Errorf("RootWebsocket: Unhandled signal: %v", sig)
 				}
 
-				ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
-				if err := websocket.JSON.Send(ws, webData); err != nil {
-					// Do not log error if connection is just closed
-					if !strings.Contains(err.Error(), ErrWsClosed) {
-						log.Debugf("Failed to encode WebSocketMessage (push) %v: %v", sig, err)
-					}
-					// If the send failed, the client is probably gone, so close
-					// the connection and quit.
+				err := send(webData)
+				if err != nil {
 					return
 				}
+
+			case update := <-xcChan:
+				buff := new(bytes.Buffer)
+				enc := json.NewEncoder(buff)
+				webData := WebSocketMessage{
+					EventId: exchangeUpdateID,
+					Message: "error",
+				}
+				err := enc.Encode(update)
+				if err == nil {
+					webData.Message = buff.String()
+				} else {
+					log.Errorf("json.Encode(*WebsocketExchangeUpdate) failed: %v", err)
+				}
+				err = send(webData)
+				if err != nil {
+					return
+				}
+
 			case <-exp.wsHub.quitWSHandler:
 				break loop
-			}
-		}
-	})
+			} // select
+		} // for a.k.a. loop:
+	}) // wsHandler := websocket.Handler(func(ws *websocket.Conn) {
 
 	wsHandler.ServeHTTP(w, r)
 }

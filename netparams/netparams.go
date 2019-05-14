@@ -26,7 +26,7 @@ var MainNetParams = Params{
 }
 
 // TestNetParams contains parameters specific running fnowallet and
-// fnod on the test network (wire.TestNet).
+// fnod on the test network (version 3) (wire.TestNet).
 var TestNetParams = Params{
 	Params:            &chaincfg.TestNetParams,
 	JSONRPCClientPort: "19209",

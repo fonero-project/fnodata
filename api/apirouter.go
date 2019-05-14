@@ -1,3 +1,4 @@
+// Copyright (c) 2018-2019, The Fonero developers
 // Copyright (c) 2017, The fnodata developers
 // See LICENSE for details.
 
@@ -17,26 +18,26 @@ type apiMux struct {
 	*chi.Mux
 }
 
+type fileMux struct {
+	*chi.Mux
+}
+
 // NewAPIRouter creates a new HTTP request path router/mux for the given API,
 // appContext.
-func NewAPIRouter(app *appContext, useRealIP bool) apiMux {
+func NewAPIRouter(app *appContext, useRealIP, compressLarge bool) apiMux {
 	// chi router
-	mux := chi.NewRouter()
-
-	if useRealIP {
-		mux.Use(middleware.RealIP)
-	}
-	mux.Use(middleware.Logger)
-	mux.Use(middleware.Recoverer)
-	//mux.Use(middleware.DefaultCompress)
-	//mux.Use(middleware.Compress(2))
-	corsMW := cors.Default()
-	mux.Use(corsMW.Handler)
+	mux := stackedMux(useRealIP)
 
 	mux.Get("/", app.root)
 
 	mux.Get("/status", app.status)
 	mux.Get("/supply", app.coinSupply)
+
+	compMiddleware := m.Next
+	if compressLarge {
+		log.Debug("Enabling compressed responses for large JSON payload endpoints.")
+		compMiddleware = middleware.NewCompressor(3).Handler()
+	}
 
 	mux.Route("/block", func(r chi.Router) {
 		r.Route("/best", func(rd chi.Router) {
@@ -44,11 +45,15 @@ func NewAPIRouter(app *appContext, useRealIP bool) apiMux {
 			rd.Get("/", app.getBlockSummary) // app.getLatestBlock
 			rd.Get("/height", app.currentHeight)
 			rd.Get("/hash", app.getBlockHash)
-			rd.Get("/header", app.getBlockHeader)
+			rd.Route("/header", func(rt chi.Router) {
+				rt.Get("/", app.getBlockHeader)
+				rt.Get("/raw", app.getBlockHeaderRaw)
+			})
+			rd.Get("/raw", app.getBlockRaw)
 			rd.Get("/size", app.getBlockSize)
 			rd.Get("/subsidy", app.blockSubsidies)
-			rd.With((middleware.Compress(1))).Get("/verbose", app.getBlockVerbose)
-			rd.Get("/pos", app.getBlockStakeInfoExtended)
+			rd.With(compMiddleware).Get("/verbose", app.getBlockVerbose)
+			rd.Get("/pos", app.getBlockStakeInfoExtendedByHeight)
 			rd.Route("/tx", func(rt chi.Router) {
 				rt.Get("/", app.getBlockTransactions)
 				rt.Get("/count", app.getBlockTransactionsCount)
@@ -59,11 +64,15 @@ func NewAPIRouter(app *appContext, useRealIP bool) apiMux {
 			rd.Use(app.BlockHashPathAndIndexCtx)
 			rd.Get("/", app.getBlockSummary)
 			rd.Get("/height", app.getBlockHeight)
-			rd.Get("/header", app.getBlockHeader)
+			rd.Route("/header", func(rt chi.Router) {
+				rt.Get("/", app.getBlockHeader)
+				rt.Get("/raw", app.getBlockHeaderRaw)
+			})
+			rd.Get("/raw", app.getBlockRaw)
 			rd.Get("/size", app.getBlockSize)
 			rd.Get("/subsidy", app.blockSubsidies)
-			rd.With((middleware.Compress(1))).Get("/verbose", app.getBlockVerbose)
-			rd.Get("/pos", app.getBlockStakeInfoExtended)
+			rd.With(compMiddleware).Get("/verbose", app.getBlockVerbose)
+			rd.Get("/pos", app.getBlockStakeInfoExtendedByHash)
 			rd.Route("/tx", func(rt chi.Router) {
 				rt.Get("/", app.getBlockTransactions)
 				rt.Get("/count", app.getBlockTransactionsCount)
@@ -73,12 +82,16 @@ func NewAPIRouter(app *appContext, useRealIP bool) apiMux {
 		r.Route("/{idx}", func(rd chi.Router) {
 			rd.Use(m.BlockIndexPathCtx)
 			rd.Get("/", app.getBlockSummary)
-			rd.Get("/header", app.getBlockHeader)
+			rd.Route("/header", func(rt chi.Router) {
+				rt.Get("/", app.getBlockHeader)
+				rt.Get("/raw", app.getBlockHeaderRaw)
+			})
 			rd.Get("/hash", app.getBlockHash)
+			rd.Get("/raw", app.getBlockRaw)
 			rd.Get("/size", app.getBlockSize)
 			rd.Get("/subsidy", app.blockSubsidies)
-			rd.With((middleware.Compress(1))).Get("/verbose", app.getBlockVerbose)
-			rd.Get("/pos", app.getBlockStakeInfoExtended)
+			rd.With(compMiddleware).Get("/verbose", app.getBlockVerbose)
+			rd.Get("/pos", app.getBlockStakeInfoExtendedByHeight)
 			rd.Route("/tx", func(rt chi.Router) {
 				rt.Get("/", app.getBlockTransactions)
 				rt.Get("/count", app.getBlockTransactionsCount)
@@ -87,7 +100,7 @@ func NewAPIRouter(app *appContext, useRealIP bool) apiMux {
 
 		r.Route("/range/{idx0}/{idx}", func(rd chi.Router) {
 			rd.Use(m.BlockIndex0PathCtx, m.BlockIndexPathCtx)
-			rd.Use(middleware.Compress(1))
+			rd.Use(compMiddleware)
 			rd.Get("/", app.getBlockRangeSummary)
 			rd.Get("/size", app.getBlockRangeSize)
 			rd.Route("/{step}", func(rs chi.Router) {
@@ -96,10 +109,8 @@ func NewAPIRouter(app *appContext, useRealIP bool) apiMux {
 				rs.Get("/size", app.getBlockRangeSteppedSize)
 			})
 			// rd.Get("/header", app.getBlockHeader)
-			// rd.Get("/pos", app.getBlockStakeInfoExtended)
+			// rd.Get("/pos", app.getBlockStakeInfoExtendedByHeight)
 		})
-
-		//r.With(middleware.DefaultCompress).Get("/raw", app.someLargeResponse)
 	})
 
 	mux.Route("/stake", func(r chi.Router) {
@@ -121,6 +132,7 @@ func NewAPIRouter(app *appContext, useRealIP bool) apiMux {
 			rd.With(m.BlockIndexPathCtx).Get("/b/{idx}", app.getStakeDiff)
 			rd.With(m.BlockIndex0PathCtx, m.BlockIndexPathCtx).Get("/r/{idx0}/{idx}", app.getStakeDiffRange)
 		})
+		r.Get("/powerless", app.getPowerlessTickets)
 	})
 
 	mux.Route("/tx", func(r chi.Router) {
@@ -128,7 +140,7 @@ func NewAPIRouter(app *appContext, useRealIP bool) apiMux {
 			rt.Route("/{txid}", func(rd chi.Router) {
 				rd.Use(m.TransactionHashCtx)
 				rd.Get("/", app.getTransaction)
-				rd.Get("/trimmed", app.getDecodedTransactions)
+				rd.Get("/trimmed", app.getDecodedTx)
 				rd.Route("/out", func(ro chi.Router) {
 					ro.Get("/", app.getTransactionOutputs)
 					ro.With(m.TransactionIOIndexCtx).Get("/{txinoutindex}", app.getTransactionOutput)
@@ -138,6 +150,7 @@ func NewAPIRouter(app *appContext, useRealIP bool) apiMux {
 					ri.With(m.TransactionIOIndexCtx).Get("/{txinoutindex}", app.getTransactionInput)
 				})
 				rd.Get("/vinfo", app.getTxVoteInfo)
+				rd.Get("/tinfo", app.getTxTicketInfo)
 			})
 		})
 		r.With(m.TransactionHashCtx).Get("/hex/{txid}", app.getTransactionHex)
@@ -158,19 +171,29 @@ func NewAPIRouter(app *appContext, useRealIP bool) apiMux {
 			rd.Get("/", app.getAddressTransactions)
 			rd.With(m.ChartGroupingCtx).Get("/types/{chartgrouping}", app.getAddressTxTypesData)
 			rd.With(m.ChartGroupingCtx).Get("/amountflow/{chartgrouping}", app.getAddressTxAmountFlowData)
-			rd.With(m.ChartGroupingCtx).Get("/unspent/{chartgrouping}", app.getAddressTxUnspentAmountData)
-			rd.With((middleware.Compress(1))).Get("/raw", app.getAddressTransactionsRaw)
+			rd.With(compMiddleware).Get("/raw", app.getAddressTransactionsRaw)
 			rd.Route("/count/{N}", func(ri chi.Router) {
 				ri.Use(m.NPathCtx)
 				ri.Get("/", app.getAddressTransactions)
-				ri.With((middleware.Compress(1))).Get("/raw", app.getAddressTransactionsRaw)
+				ri.With(compMiddleware).Get("/raw", app.getAddressTransactionsRaw)
 				ri.Route("/skip/{M}", func(rj chi.Router) {
 					rj.Use(m.MPathCtx)
 					rj.Get("/", app.getAddressTransactions)
-					rj.With((middleware.Compress(1))).Get("/raw", app.getAddressTransactionsRaw)
+					rj.With(compMiddleware).Get("/raw", app.getAddressTransactionsRaw)
 				})
 			})
 		})
+	})
+
+	// Returns agenda data like; description, name, lockedin activated and other
+	// high level agenda details for all agendas.
+	mux.Route("/agendas", func(r chi.Router) {
+		r.Get("/", app.getAgendasData)
+	})
+
+	// Returns the charts data for the respective individual agendas.
+	mux.Route("/agenda", func(r chi.Router) {
+		r.With(m.AgendIdCtx).Get("/{agendaId}", app.getAgendaData)
 	})
 
 	mux.Route("/mempool", func(r chi.Router) {
@@ -187,13 +210,27 @@ func NewAPIRouter(app *appContext, useRealIP bool) apiMux {
 
 	mux.Route("/chart", func(r chi.Router) {
 		// Return default chart data (ticket price)
-		r.Get("/", app.getTicketPriceChartData)
+		r.Route("/market/{token}", func(rd chi.Router) {
+			rd.Use(m.ExchangeTokenContext)
+			rd.With(m.StickWidthContext).Get("/candlestick/{bin}", app.getCandlestickChart)
+			rd.Get("/depth", app.getDepthChart)
+		})
 		r.With(m.ChartTypeCtx).Get("/{charttype}", app.ChartTypeData)
 	})
 
 	mux.Route("/ticketpool", func(r chi.Router) {
 		r.Get("/", app.getTicketPoolByDate)
 		r.With(m.TicketPoolCtx).Get("/bydate/{tp}", app.getTicketPoolByDate)
+		r.Get("/charts", app.getTicketPoolCharts)
+	})
+
+	mux.Route("/proposal", func(r chi.Router) {
+		r.With(m.ProposalTokenCtx).Get("/{token}", app.getProposalChartData)
+	})
+
+	mux.Route("/exchanges", func(r chi.Router) {
+		r.Get("/", app.getExchanges)
+		r.Get("/codes", app.getCurrencyCodes)
 	})
 
 	mux.NotFound(func(w http.ResponseWriter, r *http.Request) {
@@ -233,6 +270,32 @@ func NewAPIRouter(app *appContext, useRealIP bool) apiMux {
 	mux.HandleFunc("/list", app.writeJSONHandlerFunc(listRoutePatterns(mux.Routes())))
 
 	return apiMux{mux}
+}
+
+// NewFileRouter creates a new HTTP request path router/mux for file downloads.
+func NewFileRouter(app *appContext, useRealIP bool) fileMux {
+	mux := stackedMux(useRealIP)
+
+	mux.Route("/address", func(rd chi.Router) {
+		// Allow browser cache for 3 minutes.
+		rd.Use(m.CacheControl(180))
+		rd.With(m.AddressPathCtx).Get("/io/{address}", app.addressIoCsv)
+	})
+
+	return fileMux{mux}
+}
+
+// Stacks some middleware common to both file and api router.
+func stackedMux(useRealIP bool) *chi.Mux {
+	mux := chi.NewRouter()
+	if useRealIP {
+		mux.Use(middleware.RealIP)
+	}
+	mux.Use(middleware.Logger)
+	mux.Use(middleware.Recoverer)
+	corsMW := cors.Default()
+	mux.Use(corsMW.Handler)
+	return mux
 }
 
 func (mux *apiMux) ListenAndServeProto(listen, proto string) {

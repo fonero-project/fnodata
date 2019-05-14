@@ -12,16 +12,16 @@ import (
 )
 
 // TxConverter converts fnod-tx to insight tx
-func (c *insightApiContext) TxConverter(txs []*fnojson.TxRawResult) ([]apitypes.InsightTx, error) {
-	return c.FnoToInsightTxns(txs, false, false, false)
+func (iapi *InsightApi) TxConverter(txs []*fnojson.TxRawResult) ([]apitypes.InsightTx, error) {
+	return iapi.FnoToInsightTxns(txs, false, false, false)
 }
 
-// FnoToInsightTxns takes struct with filter params
-func (c *insightApiContext) FnoToInsightTxns(txs []*fnojson.TxRawResult,
-	noAsm, noScriptSig, noSpent bool) ([]apitypes.InsightTx, error) {
-	var newTxs []apitypes.InsightTx
+// FnoToInsightTxns converts a fnojson TxRawResult to a InsightTx. The asm,
+// scriptSig, and spending status may be skipped by setting the appropriate
+// input arguments.
+func (iapi *InsightApi) FnoToInsightTxns(txs []*fnojson.TxRawResult, noAsm, noScriptSig, noSpent bool) ([]apitypes.InsightTx, error) {
+	newTxs := make([]apitypes.InsightTx, 0, len(txs))
 	for _, tx := range txs {
-
 		// Build new InsightTx
 		txNew := apitypes.InsightTx{
 			Txid:          tx.Txid,
@@ -36,10 +36,8 @@ func (c *insightApiContext) FnoToInsightTxns(txs []*fnojson.TxRawResult,
 		}
 
 		// Vins fill
-		var vInSum, vOutSum float64
-
+		var vInSum float64
 		for vinID, vin := range tx.Vin {
-
 			InsightVin := &apitypes.InsightVin{
 				Txid:     vin.Txid,
 				Vout:     vin.Vout,
@@ -60,8 +58,9 @@ func (c *insightApiContext) FnoToInsightTxns(txs []*fnojson.TxRawResult,
 				}
 			}
 
-			// Note, this only gathers information from the database which does not include mempool transactions
-			_, addresses, value, err := c.BlockData.ChainDB.RetrieveAddressIDsByOutpoint(vin.Txid, vin.Vout)
+			// Note: this only gathers information from the database, which does
+			// not include mempool transactions.
+			_, addresses, value, err := iapi.BlockData.ChainDB.AddressIDsByOutpoint(vin.Txid, vin.Vout)
 			if err == nil {
 				if len(addresses) > 0 {
 					// Update Vin due to FNOD AMOUNTIN - START
@@ -82,6 +81,7 @@ func (c *insightApiContext) FnoToInsightTxns(txs []*fnojson.TxRawResult,
 		}
 
 		// Vout fill
+		var vOutSum float64
 		for _, v := range tx.Vout {
 			InsightVout := &apitypes.InsightVout{
 				Value: v.Value,
@@ -109,7 +109,7 @@ func (c *insightApiContext) FnoToInsightTxns(txs []*fnojson.TxRawResult,
 		fnoamt, _ = fnoutil.NewAmount(txNew.ValueIn - txNew.ValueOut)
 		txNew.Fees = fnoamt.ToCoin()
 
-		// Return true if coinbase value is not empty, return 0 at some fields
+		// Return true if coinbase value is not empty, return 0 at some fields.
 		if txNew.Vins != nil && txNew.Vins[0].CoinBase != "" {
 			txNew.IsCoinBase = true
 			txNew.ValueIn = 0
@@ -121,9 +121,13 @@ func (c *insightApiContext) FnoToInsightTxns(txs []*fnojson.TxRawResult,
 		}
 
 		if !noSpent {
-			// populate the spending status of all vouts
-			// Note, this only gathers information from the database which does not include mempool transactions
-			addrFull := c.BlockData.ChainDB.GetSpendDetailsByFundingHash(txNew.Txid)
+			// Populate the spending status of all vouts. Note: this only
+			// gathers information from the database, which does not include
+			// mempool transactions.
+			addrFull, err := iapi.BlockData.ChainDB.SpendDetailsForFundingTx(txNew.Txid)
+			if err != nil {
+				return nil, err
+			}
 			for _, dbaddr := range addrFull {
 				txNew.Vouts[dbaddr.FundingTxVoutIndex].SpentIndex = dbaddr.SpendingTxVinIndex
 				txNew.Vouts[dbaddr.FundingTxVoutIndex].SpentTxID = dbaddr.SpendingTxHash
@@ -136,12 +140,12 @@ func (c *insightApiContext) FnoToInsightTxns(txs []*fnojson.TxRawResult,
 }
 
 // FnoToInsightBlock converts a fnojson.GetBlockVerboseResult to Insight block.
-func (c *insightApiContext) FnoToInsightBlock(inBlocks []*fnojson.GetBlockVerboseResult) ([]*apitypes.InsightBlockResult, error) {
+func (iapi *InsightApi) FnoToInsightBlock(inBlocks []*fnojson.GetBlockVerboseResult) ([]*apitypes.InsightBlockResult, error) {
 	RewardAtBlock := func(blocknum int64, voters uint16) float64 {
-		subsidyCache := blockchain.NewSubsidyCache(0, c.params)
-		work := blockchain.CalcBlockWorkSubsidy(subsidyCache, blocknum, voters, c.params)
-		stake := blockchain.CalcStakeVoteSubsidy(subsidyCache, blocknum, c.params) * int64(voters)
-		tax := blockchain.CalcBlockTaxSubsidy(subsidyCache, blocknum, voters, c.params)
+		subsidyCache := blockchain.NewSubsidyCache(0, iapi.params)
+		work := blockchain.CalcBlockWorkSubsidy(subsidyCache, blocknum, voters, iapi.params)
+		stake := blockchain.CalcStakeVoteSubsidy(subsidyCache, blocknum, iapi.params) * int64(voters)
+		tax := blockchain.CalcBlockTaxSubsidy(subsidyCache, blocknum, voters, iapi.params)
 		return fnoutil.Amount(work + stake + tax).ToCoin()
 	}
 

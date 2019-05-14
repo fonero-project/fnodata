@@ -10,17 +10,21 @@ import (
 	"path/filepath"
 
 	"github.com/fonero-project/fnod/rpcclient"
-	"github.com/fonero-project/fnodata/api"
-	"github.com/fonero-project/fnodata/api/insight"
 	"github.com/fonero-project/fnodata/blockdata"
 	"github.com/fonero-project/fnodata/db/fnopg"
 	"github.com/fonero-project/fnodata/db/fnosqlite"
-	"github.com/fonero-project/fnodata/explorer"
+	"github.com/fonero-project/fnodata/exchanges"
+	"github.com/fonero-project/fnodata/gov/agendas"
+	"github.com/fonero-project/fnodata/gov/politeia"
 	"github.com/fonero-project/fnodata/mempool"
 	"github.com/fonero-project/fnodata/middleware"
-	notify "github.com/fonero-project/fnodata/notification"
+	"github.com/fonero-project/fnodata/pubsub"
 	"github.com/fonero-project/fnodata/rpcutils"
 	"github.com/fonero-project/fnodata/stakedb"
+	"github.com/fonero-project/fnodata/api"
+	"github.com/fonero-project/fnodata/api/insight"
+	"github.com/fonero-project/fnodata/explorer"
+	notify "github.com/fonero-project/fnodata/notification"
 	"github.com/decred/slog"
 	"github.com/jrick/logrotate/rotator"
 )
@@ -29,10 +33,10 @@ import (
 // the write-end pipe of an initialized log rotator.
 type logWriter struct{}
 
+// Write writes the data in p to standard out and the log rotator.
 func (logWriter) Write(p []byte) (n int, err error) {
 	os.Stdout.Write(p)
-	logRotator.Write(p)
-	return len(p), nil
+	return logRotator.Write(p)
 }
 
 // Loggers per subsystem.  A single backend logger is created and all subsytem
@@ -64,6 +68,10 @@ var (
 	apiLog        = backendLog.Logger("JAPI")
 	log           = backendLog.Logger("DATD")
 	iapiLog       = backendLog.Logger("IAPI")
+	pubsubLog     = backendLog.Logger("PUBS")
+	xcBotLog      = backendLog.Logger("XBOT")
+	agendasLog    = backendLog.Logger("AGDB")
+	proposalsLog  = backendLog.Logger("PRDB")
 )
 
 // Initialize package-global logger variables.
@@ -80,6 +88,10 @@ func init() {
 	insight.UseLogger(iapiLog)
 	middleware.UseLogger(apiLog)
 	notify.UseLogger(notifyLog)
+	pubsub.UseLogger(pubsubLog)
+	exchanges.UseLogger(xcBotLog)
+	agendas.UseLogger(agendasLog)
+	politeia.UseLogger(proposalsLog)
 }
 
 // subsystemLoggers maps each subsystem identifier to its associated logger.
@@ -95,6 +107,10 @@ var subsystemLoggers = map[string]slog.Logger{
 	"JAPI": apiLog,
 	"IAPI": iapiLog,
 	"DATD": log,
+	"PUBS": pubsubLog,
+	"XBOT": xcBotLog,
+	"AGDB": agendasLog,
+	"PRDB": proposalsLog,
 }
 
 // initLogRotator initializes the logging rotater to write logs to logFile and

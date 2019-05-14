@@ -1,4 +1,4 @@
-# Insight API (EXPERIMENTAL)
+# Insight API
 
 The [Insight API](https://github.com/bitpay/insight-api) is accessible via HTTP via REST or WebSocket. 
 
@@ -496,7 +496,7 @@ Methods that work with transactions.
 
 ```
 curl -X POST \
- https://alpha.fonero.org/insight/api/tx/send \
+ https://alpha.fnodata.org/insight/api/tx/send \
  -H 'Cache-Control: no-cache' \
  -H 'Content-Type: application/json' \
  -H 'Postman-Token: bf2e16a1-b6d2-4b2f-b6e5-9ea7bd3df5b1' \
@@ -746,7 +746,7 @@ Methods that work with addresses.
 
 ```
 curl -X POST \
-https://alpha.fonero.org/insight/api/addrs/utxo \
+https://alpha.fnodata.org/insight/api/addrs/utxo \
  -H 'Cache-Control: no-cache' \
  -H 'Content-Type: application/json' \
  -H 'Postman-Token: bf2e16a1-b6d2-4b2f-b6e5-9ea7bd3df5b1' \
@@ -987,7 +987,7 @@ https://alpha.fonero.org/insight/api/addrs/utxo \
 
 ```
 curl -X POST \
-https://alpha.fonero.org/insight/api/addrs/txs\
+https://alpha.fnodata.org/insight/api/addrs/txs\
  -H 'Cache-Control: no-cache' \
  -H 'Content-Type: application/json' \
  -H 'Postman-Token: bf2e16a1-b6d2-4b2f-b6e5-9ea7bd3df5b1' \

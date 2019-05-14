@@ -11,7 +11,8 @@ import (
 // distribution is given by:
 //      sum(B * P(B)), B=1 to 40960
 // Where B is the block number and P(B) is the probability of voting at
-// block B.
+// block B.  For more information see:
+// https://github.com/fonero-project/fnodata/issues/471#issuecomment-390063025
 func CalcMeanVotingBlocks(params *chaincfg.Params) int64 {
 	logPoolSizeM1 := math.Log(float64(params.TicketPoolSize) - 1)
 	logPoolSize := math.Log(float64(params.TicketPoolSize))

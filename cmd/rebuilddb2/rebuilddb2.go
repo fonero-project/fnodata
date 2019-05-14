@@ -22,6 +22,7 @@ import (
 	"github.com/fonero-project/fnodata/rpcutils"
 	"github.com/fonero-project/fnodata/stakedb"
 	"github.com/decred/slog"
+	"github.com/dmigwi/go-piparser/proposals"
 )
 
 var (
@@ -92,7 +93,7 @@ func mainCore() error {
 
 	// Connect to node RPC server
 	client, _, err := rpcutils.ConnectNodeRPC(cfg.FnodServ, cfg.FnodUser,
-		cfg.FnodPass, cfg.FnodCert, cfg.DisableDaemonTLS)
+		cfg.FnodPass, cfg.FnodCert, cfg.DisableDaemonTLS, false)
 	if err != nil {
 		log.Fatalf("Unable to connect to RPC server: %v", err)
 		return err
@@ -122,8 +123,19 @@ func mainCore() error {
 		Pass:   cfg.DBPass,
 		DBName: cfg.DBName,
 	}
+
+	log.Infof("Setting up the Politeia's proposals clone repository. Please wait...")
+
+	// repoName and repoOwner are set to empty string so that the defaults can be used.
+	parser, err := proposals.NewParser("", "", cfg.LogDir)
+	if err != nil {
+		return err
+	}
+
 	// Construct a ChainDB without a stakeDB to allow quick dropping of tables.
-	db, err := fnopg.NewChainDB(&dbi, activeChain, nil, false)
+	mpChecker := rpcutils.NewMempoolAddressChecker(client, activeChain)
+	db, err := fnopg.NewChainDB(&dbi, activeChain, nil, false, cfg.HidePGConfig, 0,
+		mpChecker, parser, client)
 	if db != nil {
 		defer db.Close()
 	}
@@ -137,12 +149,23 @@ func mainCore() error {
 	}
 
 	// Create/load stake database (which includes the separate ticket pool DB).
-	stakeDB, _, err := stakedb.NewStakeDatabase(client, activeChain, "rebuild_data")
+	sdbDir := "rebuild_data"
+	stakeDB, stakeDBHeight, err := stakedb.NewStakeDatabase(client, activeChain, sdbDir)
 	if err != nil {
-		return fmt.Errorf("Unable to create stake DB: %v", err)
+		log.Errorf("Unable to create stake DB: %v", err)
+		if stakeDBHeight >= 0 {
+			log.Infof("Attempting to recover stake DB...")
+			stakeDB, err = stakedb.LoadAndRecover(client, activeChain, sdbDir, stakeDBHeight-288)
+			stakeDBHeight = int64(stakeDB.Height())
+		}
+		if err != nil {
+			if stakeDB != nil {
+				_ = stakeDB.Close()
+			}
+			return fmt.Errorf("StakeDatabase recovery failed: %v", err)
+		}
 	}
 	defer stakeDB.Close()
-	stakeDBHeight := int64(stakeDB.Height())
 
 	// Provide the stake database to the ChainDB for all of it's ticket tracking
 	// needs.
@@ -164,8 +187,7 @@ func mainCore() error {
 	signal.Notify(c, os.Interrupt)
 
 	// Check current height of DB
-	bestHeight, err := db.HeightDB()
-	lastBlock := int64(bestHeight)
+	lastBlock, err := db.HeightDB()
 	if err != nil {
 		if err == sql.ErrNoRows {
 			lastBlock = -1
@@ -318,6 +340,12 @@ func mainCore() error {
 			return fmt.Errorf("GetBlock failed (%s): %v", blockHash, err)
 		}
 
+		// Grab the chainwork.
+		chainWork, err := rpcutils.GetChainWork(client, blockHash)
+		if err != nil {
+			return fmt.Errorf("GetChainWork failed (%s): %v", blockHash, err)
+		}
+
 		// stake db always has genesis, so do not connect it
 		var winners []string
 		if ib > 0 {
@@ -339,7 +367,7 @@ func mainCore() error {
 		isValid, isMainchain, updateExistingRecords := true, true, true
 		numVins, numVouts, _, err = db.StoreBlock(block.MsgBlock(), winners,
 			isValid, isMainchain, updateExistingRecords,
-			cfg.AddrSpendInfoOnline, !cfg.TicketSpendInfoBatch)
+			cfg.AddrSpendInfoOnline, !cfg.TicketSpendInfoBatch, chainWork)
 		if err != nil {
 			return fmt.Errorf("StoreBlock failed: %v", err)
 		}

@@ -7,10 +7,10 @@ import (
 	"regexp"
 	"strings"
 
-	flags "github.com/btcsuite/go-flags"
 	"github.com/fonero-project/fnod/chaincfg"
 	"github.com/fonero-project/fnod/fnoutil"
 	"github.com/fonero-project/fnodata/netparams"
+	flags "github.com/jessevdk/go-flags"
 )
 
 const (

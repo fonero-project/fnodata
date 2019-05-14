@@ -1,4 +1,4 @@
-// Copyright (c) 2018, The Fonero developers
+// Copyright (c) 2018-2019, The Fonero developers
 // Copyright (c) 2017, Jonathan Chappelow
 // See LICENSE for details.
 
@@ -6,12 +6,11 @@ package notification
 
 import (
 	"github.com/fonero-project/fnod/chaincfg/chainhash"
+	"github.com/fonero-project/fnod/fnojson"
 	"github.com/fonero-project/fnod/fnoutil"
 
-	"github.com/fonero-project/fnodata/api/insight"
-	"github.com/fonero-project/fnodata/explorer"
-	"github.com/fonero-project/fnodata/mempool"
 	"github.com/fonero-project/fnodata/txhelpers"
+	"github.com/fonero-project/fnodata/api/insight"
 )
 
 const (
@@ -44,25 +43,25 @@ var NtfnChans struct {
 	UpdateStatusDBHeight              chan uint32
 	SpendTxBlockChan, RecvTxBlockChan chan *txhelpers.BlockWatchedTx
 	RelevantTxMempoolChan             chan *fnoutil.Tx
-	NewTxChan                         chan *mempool.NewTx
-	ExpNewTxChan                      chan *explorer.NewMempoolTx
+	NewTxChan                         chan *fnojson.TxRawResult
 	InsightNewTxChan                  chan *insight.NewTx
+	ReorgChartsCache                  chan *txhelpers.ReorgData
 }
 
 // MakeNtfnChans create notification channels based on config
-func MakeNtfnChans(monitorMempool, postgresEnabled bool) {
+func MakeNtfnChans() {
 	// If we're monitoring for blocks OR collecting block data, these channels
 	// are necessary to handle new block notifications. Otherwise, leave them
 	// as nil so that both a send (below) blocks and a receive (in
 	// blockConnectedHandler) block. default case makes non-blocking below.
 	// quit channel case manages blockConnectedHandlers.
-	NtfnChans.ConnectChan = make(chan *chainhash.Hash, blockConnChanBuffer)
+	//NtfnChans.ConnectChan = make(chan *chainhash.Hash, blockConnChanBuffer)
 
 	// WiredDB channel for connecting new blocks
 	NtfnChans.ConnectChanWiredDB = make(chan *chainhash.Hash, blockConnChanBuffer)
 
 	// Stake DB channel for connecting new blocks - BLOCKING!
-	NtfnChans.ConnectChanStakeDB = make(chan *chainhash.Hash)
+	//NtfnChans.ConnectChanStakeDB = make(chan *chainhash.Hash)
 
 	NtfnChans.ConnectChanFnopgDB = make(chan *chainhash.Hash, blockConnChanBuffer)
 
@@ -84,16 +83,11 @@ func MakeNtfnChans(monitorMempool, postgresEnabled bool) {
 	// 	NtfnChans.RelevantTxMempoolChan = make(chan *fnoutil.Tx, relevantMempoolTxChanBuffer)
 	// }
 
-	if monitorMempool {
-		NtfnChans.NewTxChan = make(chan *mempool.NewTx, newTxChanBuffer)
-	}
+	// New mempool tx chan for general purpose mempool monitor/collector/saver.
+	NtfnChans.NewTxChan = make(chan *fnojson.TxRawResult, newTxChanBuffer)
 
-	// New mempool tx chan for explorer
-	NtfnChans.ExpNewTxChan = make(chan *explorer.NewMempoolTx, expNewTxChanBuffer)
-
-	if postgresEnabled {
-		NtfnChans.InsightNewTxChan = make(chan *insight.NewTx, expNewTxChanBuffer)
-	}
+	NtfnChans.InsightNewTxChan = make(chan *insight.NewTx, expNewTxChanBuffer)
+	NtfnChans.ReorgChartsCache = make(chan *txhelpers.ReorgData)
 }
 
 // CloseNtfnChans close all notification channels
@@ -145,11 +139,11 @@ func CloseNtfnChans() {
 		close(NtfnChans.RecvTxBlockChan)
 	}
 
-	if NtfnChans.ExpNewTxChan != nil {
-		close(NtfnChans.ExpNewTxChan)
-	}
-
 	if NtfnChans.InsightNewTxChan != nil {
 		close(NtfnChans.InsightNewTxChan)
+	}
+
+	if NtfnChans.ReorgChartsCache != nil {
+		close(NtfnChans.ReorgChartsCache)
 	}
 }

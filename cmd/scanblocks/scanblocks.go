@@ -13,6 +13,7 @@ import (
 	"github.com/fonero-project/fnod/fnoutil"
 	"github.com/fonero-project/fnod/rpcclient"
 	apitypes "github.com/fonero-project/fnodata/api/types"
+	"github.com/fonero-project/fnodata/db/dbtypes"
 	"github.com/fonero-project/fnodata/rpcutils"
 	"github.com/fonero-project/fnodata/txhelpers"
 	"github.com/decred/slog"
@@ -39,7 +40,7 @@ func mainCore() int {
 	}()
 	flag.Parse()
 
-	client, _, err := rpcutils.ConnectNodeRPC(*host, *user, *pass, *cert, *notls)
+	client, _, err := rpcutils.ConnectNodeRPC(*host, *user, *pass, *cert, *notls, false)
 	if err != nil {
 		log.Fatalf("Unable to connect to RPC server: %v", err)
 		return 1
@@ -94,7 +95,7 @@ func mainCore() int {
 			Hash:       blockhash.String(),
 			Difficulty: diffRatio,
 			StakeDiff:  fnoutil.Amount(header.SBits).ToCoin(),
-			Time:       header.Timestamp.Unix(),
+			Time:       apitypes.TimeAPI{S: dbtypes.NewTimeDef(header.Timestamp)},
 			PoolInfo: &apitypes.TicketPoolInfo{
 				Size: header.PoolSize,
 			},

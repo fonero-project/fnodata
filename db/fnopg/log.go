@@ -4,7 +4,10 @@
 
 package fnopg
 
-import "github.com/decred/slog"
+import (
+	"github.com/fonero-project/fnodata/db/cache"
+	"github.com/decred/slog"
+)
 
 // log is a logger that is initialized with no output filters.  This
 // means the package will not perform any logging by default until the caller
@@ -20,4 +23,5 @@ func DisableLog() {
 // UseLogger uses a specified Logger to output package logging info.
 func UseLogger(logger slog.Logger) {
 	log = logger
+	cache.UseLogger(logger)
 }

@@ -1,6 +1,6 @@
 language: go
 go:
-  - "1.x"
+  - 1.x
 
 addons:
   apt:
@@ -12,7 +12,7 @@ services:
   - docker
 
 env:
-  - GOVERSION=1.11
+  - GOVERSION=1.12
 
 install: true
 
@@ -21,4 +21,5 @@ cache:
     - ~/.cache
 
 script:
-  - ./run_tests.sh $GOVERSION
+   - docker build -t fonero-project/fnodata .
+   - ./run_tests.sh docker

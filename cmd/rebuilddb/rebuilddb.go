@@ -56,7 +56,7 @@ func mainCore() int {
 
 	// Connect to node RPC server
 	client, _, err := rpcutils.ConnectNodeRPC(cfg.FnodServ, cfg.FnodUser,
-		cfg.FnodPass, cfg.FnodCert, cfg.DisableDaemonTLS)
+		cfg.FnodPass, cfg.FnodCert, cfg.DisableDaemonTLS, false)
 	if err != nil {
 		log.Fatalf("Unable to connect to RPC server: %v", err)
 		return 1
@@ -75,12 +75,29 @@ func mainCore() int {
 		return 2
 	}
 
+	// StakeDatabase
+	sdbDir := "rebuild_data"
+	stakeDB, stakeDBHeight, err := stakedb.NewStakeDatabase(client, activeChain, sdbDir)
+	if err != nil {
+		log.Errorf("Unable to create stake DB: %v", err)
+		if stakeDBHeight >= 0 {
+			log.Infof("Attempting to recover stake DB...")
+			stakeDB, err = stakedb.LoadAndRecover(client, activeChain, sdbDir, stakeDBHeight-288)
+		}
+		if err != nil {
+			if stakeDB != nil {
+				_ = stakeDB.Close()
+			}
+			log.Errorf("StakeDatabase recovery failed: %v", err)
+			return 1
+		}
+	}
+	defer stakeDB.Close()
+
 	// Sqlite output
 	dbInfo := fnosqlite.DBInfo{FileName: cfg.DBFileName}
-	//sqliteDB, err := fnosqlite.InitDB(&dbInfo)
-	sqliteDB, cleanupDB, err := fnosqlite.InitWiredDB(&dbInfo, nil, client,
-		activeChain, "rebuild_data", true)
-	defer cleanupDB()
+	sqliteDB, err := fnosqlite.InitWiredDB(&dbInfo, stakeDB, nil, client,
+		activeChain, func() {})
 	if err != nil {
 		log.Errorf("Unable to initialize SQLite database: %v", err)
 	}

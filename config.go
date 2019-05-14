@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2018 The Fonero developers
+// Copyright (c) 2016-2019 The Fonero developers
 // Copyright (c) 2017 Jonathan Chappelow
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
@@ -7,14 +7,17 @@ package main
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
-	flags "github.com/btcsuite/go-flags"
 	"github.com/caarlos0/env"
 	"github.com/fonero-project/fnod/chaincfg"
 	"github.com/fonero-project/fnod/fnoutil"
@@ -23,6 +26,7 @@ import (
 	"github.com/fonero-project/fnodata/netparams"
 	"github.com/fonero-project/fnodata/version"
 	"github.com/decred/slog"
+	flags "github.com/jessevdk/go-flags"
 )
 
 const (
@@ -44,25 +48,41 @@ var (
 	fnodHomeDir              = fnoutil.AppDataDir("fnod", false)
 	defaultDaemonRPCCertFile = filepath.Join(fnodHomeDir, "rpc.cert")
 
-	defaultHost               = "localhost"
-	defaultHTTPProfPath       = "/p"
-	defaultAPIProto           = "http"
-	defaultAPIListen          = "127.0.0.1:7777"
-	defaultIndentJSON         = "   "
-	defaultCacheControlMaxAge = 86400
+	defaultHost                = "localhost"
+	defaultHTTPProfPath        = "/p"
+	defaultAPIProto            = "http"
+	defaultAPIPort             = "7777"
+	defaultAPIListen           = defaultHost + ":" + defaultAPIPort
+	defaultIndentJSON          = "   "
+	defaultCacheControlMaxAge  = 86400
+	defaultInsightReqRateLimit = 20.0
+	defaultMaxCSVAddrs         = 25
 
-	defaultMonitorMempool     = true
 	defaultMempoolMinInterval = 2
 	defaultMempoolMaxInterval = 120
 	defaultMPTriggerTickets   = 1
 
-	defaultDBFileName      = "fnodata.sqlt.db"
-	defaultAgendDBFileName = "agendas.db"
+	defaultDBFileName        = "fnodata.sqlt.db"
+	defaultAgendasDBFileName = "agendas.db"
+	defaultProposalsFileName = "proposals.db"
+	defaultPoliteiaAPIURl    = "https://proposals.fonero.org"
+	defaultChartsCacheDump   = "chartscache.gob"
 
-	defaultPGHost   = "127.0.0.1:5432"
-	defaultPGUser   = "fnodata"
-	defaultPGPass   = ""
-	defaultPGDBName = "fnodata"
+	defaultPGHost                       = "127.0.0.1:5432"
+	defaultPGUser                       = "fnodata"
+	defaultPGPass                       = ""
+	defaultPGDBName                     = "fnodata"
+	defaultPGQueryTimeout time.Duration = time.Hour
+	defaultAddrCacheCap                 = 1 << 27 // 128 MiB
+
+	defaultExchangeIndex     = "USD"
+	defaultDisabledExchanges = "huobi,dragonex"
+	defaultRateCertFile      = filepath.Join(defaultHomeDir, "rpc.cert")
+
+	defaultMainnetLink = "https://explorer.fnodata.org/"
+	defaultTestnetLink = "https://testnet.fnodata.org/"
+
+	maxSyncStatusLimit = 5000
 )
 
 type config struct {
@@ -83,31 +103,46 @@ type config struct {
 	UseGops      bool   `short:"g" long:"gops" description:"Run with gops diagnostics agent listening. See github.com/google/gops for more information." env:"FNODATA_USE_GOPS"`
 
 	// API
-	APIProto           string `long:"apiproto" description:"Protocol for API (http or https)" env:"FNODATA_ENABLE_HTTPS"`
-	APIListen          string `long:"apilisten" description:"Listen address for API" env:"FNODATA_LISTEN_URL"`
-	IndentJSON         string `long:"indentjson" description:"String for JSON indentation (default is \"   \"), when indentation is requested via URL query."`
-	UseRealIP          bool   `long:"userealip" description:"Use the RealIP middleware from the pressly/chi/middleware package to get the client's real IP from the X-Forwarded-For or X-Real-IP headers, in that order." env:"FNODATA_USE_REAL_IP"`
-	CacheControlMaxAge int    `long:"cachecontrol-maxage" description:"Set CacheControl in the HTTP response header to a value in seconds for clients to cache the response. This applies only to FileServer routes." env:"FNODATA_MAX_CACHE_AGE"`
+	APIProto            string  `long:"apiproto" description:"Protocol for API (http or https)" env:"FNODATA_ENABLE_HTTPS"`
+	APIListen           string  `long:"apilisten" description:"Listen address for API" env:"FNODATA_LISTEN_URL"`
+	IndentJSON          string  `long:"indentjson" description:"String for JSON indentation (default is \"   \"), when indentation is requested via URL query."`
+	UseRealIP           bool    `long:"userealip" description:"Use the RealIP middleware from the pressly/chi/middleware package to get the client's real IP from the X-Forwarded-For or X-Real-IP headers, in that order." env:"FNODATA_USE_REAL_IP"`
+	CacheControlMaxAge  int     `long:"cachecontrol-maxage" description:"Set CacheControl in the HTTP response header to a value in seconds for clients to cache the response. This applies only to FileServer routes." env:"FNODATA_MAX_CACHE_AGE"`
+	InsightReqRateLimit float64 `long:"insight-limit-rps" description:"Requests/second per client IP for the Insight API's rate limiter." env:"FNODATA_INSIGHT_RATE_LIMIT"`
+	MaxCSVAddrs         int     `long:"max-api-addrs" description:"Maximum allowed comma-separated addresses for endpoints that accept multiple addresses."`
+	CompressAPI         bool    `long:"compress-api" description:"Use compression for a number of endpoints with commonly large responses."`
 
 	// Data I/O
-	MonitorMempool     bool   `short:"m" long:"mempool" description:"Monitor mempool for new transactions, and report ticketfee info when new tickets are added." env:"FNODATA_ENABLE_MEMPOOL_MONITOR"`
 	MempoolMinInterval int    `long:"mp-min-interval" description:"The minimum time in seconds between mempool reports, regarless of number of new tickets seen." env:"FNODATA_MEMPOOL_MIN_INTERVAL"`
 	MempoolMaxInterval int    `long:"mp-max-interval" description:"The maximum time in seconds between mempool reports (within a couple seconds), regarless of number of new tickets seen." env:"FNODATA_MEMPOOL_MAX_INTERVAL"`
 	MPTriggerTickets   int    `long:"mp-ticket-trigger" description:"The number minimum number of new tickets that must be seen to trigger a new mempool report." env:"FNODATA_MP_TRIGGER_TICKETS"`
-	DumpAllMPTix       bool   `long:"dumpallmptix" description:"Dump to file the fees of all the tickets in mempool." env:"FNODATA_ENABLE_DUMP_ALL_MP_TIX"`
 	DBFileName         string `long:"dbfile" description:"SQLite DB file name (default is fnodata.sqlt.db)." env:"FNODATA_SQLITE_DB_FILE_NAME"`
-	AgendaDBFileName   string `long:"agendadbfile" description:"Agenda DB file name (default is agendas.db)." env:"FNODATA_AGENDA_DB_FILE_NAME"`
+	SQLiteMaxConns     int    `long:"sqlite-max-conns" description:"The maximum number of open connections to the SQLite database. By default there is no limit."`
+	AgendasDBFileName  string `long:"agendadbfile" description:"Agendas DB file name (default is agendas.db)." env:"FNODATA_AGENDAS_DB_FILE_NAME"`
+	ProposalsFileName  string `long:"proposalsdbfile" description:"Proposals DB file name (default is proposals.db)." env:"FNODATA_PROPOSALS_DB_FILE_NAME"`
+	PoliteiaAPIURL     string `long:"politeiaurl" description:"Defines the root API politeia URL (defaults to https://proposals.fonero.org)."`
+	ChartsCacheDump    string `long:"chartscache" description:"Defines the file name that holds the charts cache data on system exit."`
+	PiPropRepoOwner    string `long:"piproposalsowner" description:"Defines the owner to the github repo where politeia's proposals are pushed."`
+	PiPropRepoName     string `long:"piproposalsrepo" description:"Defines the name of the github repo where politeia's proposals are pushed."`
 
-	FullMode         bool   `long:"pg" description:"Run in \"Full Mode\" mode,  enables postgresql support" env:"FNODATA_ENABLE_FULL_MODE"`
-	PGDBName         string `long:"pgdbname" description:"PostgreSQL DB name." env:"FNODATA_PG_DB_NAME"`
-	PGUser           string `long:"pguser" description:"PostgreSQL DB user." env:"FNODATA_POSTGRES_USER"`
-	PGPass           string `long:"pgpass" description:"PostgreSQL DB password." env:"FNODATA_POSTGRES_PASS"`
-	PGHost           string `long:"pghost" description:"PostgreSQL server host:port or UNIX socket (e.g. /run/postgresql)." env:"FNODATA_POSTGRES_HOST_URL"`
-	NoDevPrefetch    bool   `long:"no-dev-prefetch" description:"Disable automatic dev fund balance query on new blocks. When true, the query will still be run on demand, but not automatically after new blocks are connected." env:"FNODATA_DISABLE_DEV_PREFETCH"`
-	SyncAndQuit      bool   `long:"sync-and-quit" description:"Sync to the best block and exit. Do not start the explorer or API." env:"FNODATA_ENABLE_SYNC_N_QUIT"`
-	ImportSideChains bool   `long:"import-side-chains" description:"(experimental) Enable startup import of side chains retrieved from fnod via getchaintips." env:"FNODATA_IMPORT_SIDE_CHAINS"`
+	PurgeNBestBlocks int  `long:"purge-n-blocks" description:"Purge all data for the N best blocks, using the best block across all DBs if they are out of sync."`
+	FastSQLitePurge  bool `long:"fast-sqlite-purge" description:"Purge all data for the blocks above the specified height."`
 
-	SyncStatusLimit int64 `long:"sync-status-limit" description:"Sets the number of blocks behind the current best height past which only the syncing status page can be served on the running web server. Value should be greater than 2 but less than 5000."`
+	FullMode       bool          `long:"pg" description:"Run in \"Full Mode\" mode,  enables postgresql support" env:"FNODATA_ENABLE_FULL_MODE"`
+	PGDBName       string        `long:"pgdbname" description:"PostgreSQL DB name." env:"FNODATA_PG_DB_NAME"`
+	PGUser         string        `long:"pguser" description:"PostgreSQL DB user." env:"FNODATA_POSTGRES_USER"`
+	PGPass         string        `long:"pgpass" description:"PostgreSQL DB password." env:"FNODATA_POSTGRES_PASS"`
+	PGHost         string        `long:"pghost" description:"PostgreSQL server host:port or UNIX socket (e.g. /run/postgresql)." env:"FNODATA_POSTGRES_HOST_URL"`
+	PGQueryTimeout time.Duration `short:"T" long:"pgtimeout" description:"Timeout (a time.Duration string) for most PostgreSQL queries used for user initiated queries."`
+	HidePGConfig   bool          `long:"hidepgconfig" description:"Blocks logging of the PostgreSQL db configuration on system start up."`
+	AddrCacheCap   int           `long:"addr-cache-cap" description:"Address cache capacity in bytes."`
+	DropIndexes    bool          `long:"drop-inds" short:"D" description:"Drop all table indexes and exit."`
+
+	NoDevPrefetch    bool `long:"no-dev-prefetch" description:"Disable automatic dev fund balance query on new blocks. When true, the query will still be run on demand, but not automatically after new blocks are connected." env:"FNODATA_DISABLE_DEV_PREFETCH"`
+	SyncAndQuit      bool `long:"sync-and-quit" description:"Sync to the best block and exit. Do not start the explorer or API." env:"FNODATA_ENABLE_SYNC_N_QUIT"`
+	ImportSideChains bool `long:"import-side-chains" description:"(experimental) Enable startup import of side chains retrieved from fnod via getchaintips." env:"FNODATA_IMPORT_SIDE_CHAINS"`
+
+	SyncStatusLimit int `long:"sync-status-limit" description:"Sets the number of blocks behind the current best height past which only the syncing status page can be served on the running web server. Value should be greater than 2 but less than 5000."`
 
 	// WatchAddresses []string `short:"w" long:"watchaddress" description:"Watched address (receiving). One per line."`
 	// SMTPUser     string `long:"smtpuser" description:"SMTP user name"`
@@ -122,31 +157,54 @@ type config struct {
 	FnodServ         string `long:"fnodserv" description:"Hostname/IP and port of fnod RPC server to connect to (default localhost:9209, testnet: localhost:19209, simnet: localhost:19556)" env:"FNODATA_FNOD_URL"`
 	FnodCert         string `long:"fnodcert" description:"File containing the fnod certificate file" env:"FNODATA_FNOD_CERT"`
 	DisableDaemonTLS bool   `long:"nodaemontls" description:"Disable TLS for the daemon RPC client -- NOTE: This is only allowed if the RPC client is connecting to localhost" env:"FNODATA_FNOD_DISABLE_TLS"`
+	BlockPrefetch    bool   `long:"fnod-block-prefetch" short:"P" description:"Pre-fetch blocks from fnod during startup sync."`
+
+	// ExchangeBot settings
+	EnableExchangeBot bool   `long:"exchange-monitor" description:"Enable the exchange monitor" env:"FNODATA_MONITOR_EXCHANGES"`
+	DisabledExchanges string `long:"disable-exchange" description:"Exchanges to disable. See /exchanges/exchanges.go for available exchanges. Use a comma to separate multiple exchanges" env:"FNODATA_DISABLE_EXCHANGES"`
+	ExchangeCurrency  string `long:"exchange-currency" description:"The default bitcoin price index. A 3-letter currency code" env:"FNODATA_EXCHANGE_INDEX"`
+	RateMaster        string `long:"ratemaster" description:"The address of a FNORates instance. Exchange monitoring will get all data from a FNORates subscription." env:"FNODATA_RATE_MASTER"`
+	RateCertificate   string `long:"ratecert" description:"File containing FNORates TLS certificate file." env:"FNODATA_RATE_MASTER"`
+
+	// Links
+	MainnetLink string `long:"mainnet-link" description:"When fnodata is on testnet, this address will be used to direct a user to a fnodata on mainnet when appropriate." env:"FNODATA_MAINNET_LINK"`
+	TestnetLink string `long:"testnet-link" description:"When fnodata is on mainnet, this address will be used to direct a user to a fnodata on testnet when appropriate." env:"FNODATA_TESTNET_LINK"`
 }
 
 var (
 	defaultConfig = config{
-		HomeDir:            defaultHomeDir,
-		DataDir:            defaultDataDir,
-		LogDir:             defaultLogDir,
-		ConfigFile:         defaultConfigFile,
-		DBFileName:         defaultDBFileName,
-		AgendaDBFileName:   defaultAgendDBFileName,
-		DebugLevel:         defaultLogLevel,
-		HTTPProfPath:       defaultHTTPProfPath,
-		APIProto:           defaultAPIProto,
-		APIListen:          defaultAPIListen,
-		IndentJSON:         defaultIndentJSON,
-		CacheControlMaxAge: defaultCacheControlMaxAge,
-		FnodCert:           defaultDaemonRPCCertFile,
-		MonitorMempool:     defaultMonitorMempool,
-		MempoolMinInterval: defaultMempoolMinInterval,
-		MempoolMaxInterval: defaultMempoolMaxInterval,
-		MPTriggerTickets:   defaultMPTriggerTickets,
-		PGDBName:           defaultPGDBName,
-		PGUser:             defaultPGUser,
-		PGPass:             defaultPGPass,
-		PGHost:             defaultPGHost,
+		HomeDir:             defaultHomeDir,
+		DataDir:             defaultDataDir,
+		LogDir:              defaultLogDir,
+		ConfigFile:          defaultConfigFile,
+		DBFileName:          defaultDBFileName,
+		AgendasDBFileName:   defaultAgendasDBFileName,
+		ProposalsFileName:   defaultProposalsFileName,
+		PoliteiaAPIURL:      defaultPoliteiaAPIURl,
+		ChartsCacheDump:     defaultChartsCacheDump,
+		DebugLevel:          defaultLogLevel,
+		HTTPProfPath:        defaultHTTPProfPath,
+		APIProto:            defaultAPIProto,
+		APIListen:           defaultAPIListen,
+		IndentJSON:          defaultIndentJSON,
+		CacheControlMaxAge:  defaultCacheControlMaxAge,
+		InsightReqRateLimit: defaultInsightReqRateLimit,
+		MaxCSVAddrs:         defaultMaxCSVAddrs,
+		FnodCert:            defaultDaemonRPCCertFile,
+		MempoolMinInterval:  defaultMempoolMinInterval,
+		MempoolMaxInterval:  defaultMempoolMaxInterval,
+		MPTriggerTickets:    defaultMPTriggerTickets,
+		PGDBName:            defaultPGDBName,
+		PGUser:              defaultPGUser,
+		PGPass:              defaultPGPass,
+		PGHost:              defaultPGHost,
+		PGQueryTimeout:      defaultPGQueryTimeout,
+		AddrCacheCap:        defaultAddrCacheCap,
+		ExchangeCurrency:    defaultExchangeIndex,
+		DisabledExchanges:   defaultDisabledExchanges,
+		RateCertificate:     defaultRateCertFile,
+		MainnetLink:         defaultMainnetLink,
+		TestnetLink:         defaultTestnetLink,
 	}
 )
 
@@ -197,6 +255,37 @@ func cleanAndExpandPath(path string) string {
 	}
 
 	return filepath.Join(homeDir, path)
+}
+
+// normalizeNetworkAddress checks for a valid local network address format and
+// adds default host and port if not present. Invalidates addresses that include
+// a protocol identifier.
+func normalizeNetworkAddress(a, defaultHost, defaultPort string) (string, error) {
+	if strings.Contains(a, "://") {
+		return a, fmt.Errorf("Address %s contains a protocol identifier, which is not allowed", a)
+	}
+	if a == "" {
+		return defaultHost + ":" + defaultPort, nil
+	}
+	host, port, err := net.SplitHostPort(a)
+	if err != nil {
+		if strings.Contains(err.Error(), "missing port in address") {
+			normalized := a + ":" + defaultPort
+			host, port, err = net.SplitHostPort(normalized)
+			if err != nil {
+				return a, fmt.Errorf("Unable to address %s after port resolution: %v", normalized, err)
+			}
+		} else {
+			return a, fmt.Errorf("Unable to normalize address %s: %v", a, err)
+		}
+	}
+	if host == "" {
+		host = defaultHost
+	}
+	if port == "" {
+		port = defaultPort
+	}
+	return host + ":" + port, nil
 }
 
 // validLogLevel returns whether or not logLevel is a valid debug log level.
@@ -470,10 +559,8 @@ func loadConfig() (*config, error) {
 	log.Infof("Log folder:  %s", cfg.LogDir)
 	log.Infof("Config file: %s", configFile)
 
-	// If import-sidechains is true, but not running in full mode, warn the user
-	// that side chain import cannot be performed.
-	if !cfg.FullMode && cfg.ImportSideChains {
-		log.Warn("Unable to import side chains in lite mode!")
+	if cfg.FullMode {
+		log.Warn("The --pg switch is deprecated since full-mode is now required.")
 	}
 
 	// Disable dev balance prefetch if network has invalid script.
@@ -483,22 +570,27 @@ func loadConfig() (*config, error) {
 		log.Warnf("%v. Disabling balance prefetch (--no-dev-prefetch).", err)
 	}
 
-	// Check if sync-status-limit value has been set. If its equal to zero then
-	// it hasn't been set.
+	// Validate SyncStatusLimit has been set. Zero means always show sync status
+	// page instead of full block explorer pages.
 	if cfg.SyncStatusLimit != 0 {
-		// sync-status-limit value should not be set to a value less than 2 or to a
-		// value greater than 5000. 5000 is the max value that can be set by the user
-		// in fnodata.conf file.
-		if cfg.SyncStatusLimit < 2 || cfg.SyncStatusLimit > 5000 {
-			return nil, fmt.Errorf("sync-status-limit should not be set to a value " +
-				"less than 2 or more than 5000")
+		// The sync-status-limit value should not be set to a value less than 2
+		// or greater than maxSyncStatusLimit.
+		if cfg.SyncStatusLimit < 2 || cfg.SyncStatusLimit > maxSyncStatusLimit {
+			return nil, fmt.Errorf("sync-status-limit should not be set to "+
+				"a value less than 2 or more than %d", maxSyncStatusLimit)
 		}
+	}
+
+	// Validate block purge options.
+	if cfg.PurgeNBestBlocks < 0 {
+		return nil, fmt.Errorf("purge-n-blocks must be non-negative")
 	}
 
 	// Set the host names and ports to the default if the user does not specify
 	// them.
-	if cfg.FnodServ == "" {
-		cfg.FnodServ = defaultHost + ":" + activeNet.JSONRPCClientPort
+	cfg.FnodServ, err = normalizeNetworkAddress(cfg.FnodServ, defaultHost, activeNet.JSONRPCClientPort)
+	if err != nil {
+		return loadConfigError(err)
 	}
 
 	// Output folder
@@ -521,6 +613,12 @@ func loadConfig() (*config, error) {
 		cfg.DebugLevel = "error"
 	}
 
+	// Validate DB timeout. Zero or negative should be set to the large default
+	// timeout to effectively disable timeouts.
+	if cfg.PGQueryTimeout <= 0 {
+		cfg.PGQueryTimeout = defaultPGQueryTimeout
+	}
+
 	// Parse, validate, and set debug log level(s).
 	if err := parseAndSetDebugLevels(cfg.DebugLevel); err != nil {
 		err = fmt.Errorf("%s: %v", funcName, err.Error())
@@ -528,11 +626,39 @@ func loadConfig() (*config, error) {
 		parser.WriteHelp(os.Stderr)
 		return loadConfigError(err)
 	}
+
+	// Checks if the expected format of the API URL was set. It also drops any
+	// unnecessary parts of the URL.
+	urlPath, err := retrieveRootPath(cfg.PoliteiaAPIURL)
+	if err != nil {
+		return loadConfigError(err)
+	}
+	cfg.PoliteiaAPIURL = urlPath
+
+	// Check the supplied APIListen address
+	cfg.APIListen, err = normalizeNetworkAddress(cfg.APIListen, defaultHost, defaultAPIPort)
+	if err != nil {
+		return loadConfigError(err)
+	}
+
+	// Expand some additional paths.
+	cfg.FnodCert = cleanAndExpandPath(cfg.FnodCert)
+	cfg.DBFileName = cleanAndExpandPath(cfg.DBFileName)
+	cfg.AgendasDBFileName = cleanAndExpandPath(cfg.AgendasDBFileName)
+	cfg.ProposalsFileName = cleanAndExpandPath(cfg.ProposalsFileName)
+	cfg.RateCertificate = cleanAndExpandPath(cfg.RateCertificate)
+	cfg.ChartsCacheDump = cleanAndExpandPath(cfg.ChartsCacheDump)
+
+	// Clean up the provided mainnet and testnet links, ensuring there is a single
+	// trailing slash.
+	cfg.MainnetLink = strings.TrimSuffix(cfg.MainnetLink, "/") + "/"
+	cfg.TestnetLink = strings.TrimSuffix(cfg.TestnetLink, "/") + "/"
+
 	return &cfg, nil
 }
 
 // netName returns the name used when referring to a fonero network. TestNet
-// correctly returns "testnet". This function may be removed
+// correctly returns "testnet", but not TestNet3. This function may be removed
 // after testnet2 is ancient history.
 func netName(chainParams *netparams.Params) string {
 	// The following switch is to ensure this code is not built for testnet2, as
@@ -543,4 +669,25 @@ func netName(chainParams *netparams.Params) string {
 		log.Warnf("Unknown network: %s", chainParams.Name)
 	}
 	return chainParams.Name
+}
+
+// retrieveRootPath drops all extra characters that are not part of the root path.
+// i.e. with input http://www.mydomain.com/xxxxx, http://www.mydomain.com should
+// be returned.
+func retrieveRootPath(path string) (string, error) {
+	r, err := url.Parse(path)
+	if err != nil {
+		return "", fmt.Errorf("invalid '%s' url used. error: %v", path, err)
+	}
+
+	// If the url scheme or host were not found, a regex expression can be used to
+	// eliminate the unwanted part.
+	if r.Scheme == "" || r.Host == "" {
+		exp := regexp.MustCompile(`([\/?]\S*)`)
+		return exp.ReplaceAllLiteralString(path, ""), nil
+	}
+
+	r.Path = ""     // Drop any set path and the leading slash
+	r.RawQuery = "" // Drop any set Query
+	return r.String(), nil
 }

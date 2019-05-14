@@ -1,4 +1,4 @@
-// Copyright (c) 2018, The Fonero developers
+// Copyright (c) 2018-2019, The Fonero developers
 // Copyright (c) 2017, Jonathan Chappelow
 // See LICENSE for details.
 
@@ -6,27 +6,28 @@ package fnosqlite
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/fonero-project/fnod/chaincfg/chainhash"
 	"github.com/fonero-project/fnod/fnoutil"
 	apitypes "github.com/fonero-project/fnodata/api/types"
+	"github.com/fonero-project/fnodata/blockdata"
 	"github.com/fonero-project/fnodata/db/dbtypes"
-	"github.com/fonero-project/fnodata/explorer"
 	"github.com/fonero-project/fnodata/rpcutils"
 	"github.com/fonero-project/fnodata/txhelpers"
 )
 
 const (
-	rescanLogBlockChunk      = 1000
-	InitialLoadSyncStatusMsg = "(Lite Mode) Syncing stake and base DBs..."
+	rescanLogBlockChunk = 1000
 )
 
 // DBHeights returns the best block heights of: SQLite database tables (block
 // summary and stake info tables), the stake database (ffldb_stake), and the
 // lowest of these. An error value is returned if any database is inaccessible.
-func (db *wiredDB) DBHeights() (lowest int64, summaryHeight int64, stakeInfoHeight int64,
+func (db *WiredDB) DBHeights() (lowest int64, summaryHeight int64, stakeInfoHeight int64,
 	stakeDatabaseHeight int64, err error) {
 	// Get DB's best block (for block summary and stake info tables)
 	if summaryHeight, err = db.GetBlockSummaryHeight(); err != nil {
@@ -53,8 +54,45 @@ func (db *wiredDB) DBHeights() (lowest int64, summaryHeight int64, stakeInfoHeig
 	return
 }
 
-func (db *wiredDB) initWaitChan(waitChan chan chainhash.Hash) {
+func (db *WiredDB) initWaitChan(waitChan chan chainhash.Hash) {
 	db.waitChan = waitChan
+}
+
+func parseUnknownTicketError(err error) (hash *chainhash.Hash) {
+	// Look for the dreaded ticket database error.
+	re := regexp.MustCompile(`unknown ticket (\w*) spent in block`)
+	matches := re.FindStringSubmatch(err.Error())
+	var unknownTicket string
+	if len(matches) <= 1 {
+		// Unable to parse the error as unknown ticket message.
+		return
+	}
+	unknownTicket = matches[1]
+	ticketHash, err1 := chainhash.NewHashFromStr(unknownTicket)
+	if err1 != nil {
+		return
+	}
+	return ticketHash
+}
+
+// supplementUnknownTicketError checks the passed error for the "unknown ticket
+// [hash] spent in block" message, and supplements matching errors with the
+// block height of the ticket and switches to help recovery.
+func (db *WiredDB) supplementUnknownTicketError(err error) error {
+	ticketHash := parseUnknownTicketError(err)
+	if ticketHash == nil {
+		return err
+	}
+	txraw, err1 := db.client.GetRawTransactionVerbose(ticketHash)
+	if err1 != nil {
+		return err
+	}
+	badTxBlock := txraw.BlockHeight
+	sDBHeight := int64(db.sDB.Height())
+	numToPurge := sDBHeight - badTxBlock + 1
+	return fmt.Errorf("%v\n\t**** Unknown ticket was mined in block %d. "+
+		"Try \"--purge-n-blocks=%d --fast-sqlite-purge\" to recover. ****",
+		err, badTxBlock, numToPurge)
 }
 
 // RewindStakeDB attempts to disconnect blocks from the stake database to reach
@@ -62,25 +100,44 @@ func (db *wiredDB) initWaitChan(waitChan chan chainhash.Hash) {
 // should abort. If the specified height is greater than the current stake DB
 // height, RewindStakeDB will exit without error, returning the current stake DB
 // height and a nil error.
-func (db *wiredDB) RewindStakeDB(ctx context.Context, toHeight int64) (stakeDBHeight int64, err error) {
-	// rewind best node in ticket db
-	stakeDBHeight = int64(db.sDB.Height())
+func (db *WiredDB) RewindStakeDB(ctx context.Context, toHeight int64, quiet ...bool) (stakeDBHeight int64, err error) {
+	// Target height must be non-negative. It is not possible to disconnect the
+	// genesis block.
 	if toHeight < 0 {
 		toHeight = 0
 	}
-	fromHeight := stakeDBHeight
-	log.Infof("Rewinding from %d to %d", fromHeight, toHeight)
+
+	// Periodically log progress unless quiet[0]==true
+	showProgress := true
+	if len(quiet) > 0 {
+		showProgress = !quiet[0]
+	}
+
+	// Disconnect blocks until the stake database reaches the target height.
+	stakeDBHeight = int64(db.sDB.Height())
+	startHeight := stakeDBHeight
+	pStep := int64(1000)
 	for stakeDBHeight > toHeight {
-		if stakeDBHeight == fromHeight || stakeDBHeight%200 == 0 {
-			log.Infof("Rewinding from %d to %d", stakeDBHeight, toHeight)
+		// Log rewind progress at regular intervals.
+		if stakeDBHeight == startHeight || stakeDBHeight%pStep == 0 {
+			endSegment := pStep * ((stakeDBHeight - 1) / pStep)
+			if endSegment < toHeight {
+				endSegment = toHeight
+			}
+			if showProgress {
+				log.Infof("Rewinding from %d to %d", stakeDBHeight, endSegment)
+			}
 		}
-		// check for quit signal
+
+		// Check for quit signal.
 		select {
 		case <-ctx.Done():
 			log.Infof("Rewind cancelled at height %d.", stakeDBHeight)
 			return
 		default:
 		}
+
+		// Disconect the best block.
 		if err = db.sDB.DisconnectBlock(false); err != nil {
 			return
 		}
@@ -90,11 +147,9 @@ func (db *wiredDB) RewindStakeDB(ctx context.Context, toHeight int64) (stakeDBHe
 	return
 }
 
-func (db *wiredDB) resyncDB(ctx context.Context, blockGetter rpcutils.BlockGetter,
-	fetchToHeight int64, updateExplorer chan *chainhash.Hash,
-	barLoad chan *dbtypes.ProgressBarLoad) (int64, error) {
-	// Determine if we're in lite mode, when we are the "master" who sets the
-	// pace rather than waiting on other consumers to get done with the stakedb.
+func (db *WiredDB) resyncDB(ctx context.Context, blockGetter rpcutils.BlockGetter, fetchToHeight int64) (int64, error) {
+	// Determine if we are the "master" block getter who sets the pace rather
+	// than waiting on other consumers to get done with the stakedb.
 	master := blockGetter == nil || blockGetter.(*rpcutils.BlockGate) == nil
 
 	// Get chain servers's best block.
@@ -186,15 +241,6 @@ func (db *wiredDB) resyncDB(ctx context.Context, blockGetter rpcutils.BlockGette
 		return height, nil
 	}
 
-	// Initialize the progress bars on the sync status page.
-	if barLoad != nil && db.updateStatusSync {
-		barLoad <- &dbtypes.ProgressBarLoad{
-			Msg:   InitialLoadSyncStatusMsg,
-			BarID: dbtypes.InitialDBLoad,
-		}
-	}
-
-	timeStart := time.Now()
 	for i := startHeight; i <= height; i++ {
 		// check for quit signal
 		select {
@@ -232,6 +278,17 @@ func (db *wiredDB) resyncDB(ctx context.Context, blockGetter rpcutils.BlockGette
 			db.waitChan = blockGetter.WaitForHeight(i + 1)
 		}
 
+		// Ensure the blockGetter gave us the correct block.
+		if !blockhash.IsEqual(block.Hash()) {
+			panic(fmt.Sprintf("about to connect the wrong block: wanted %s, got %s",
+				blockhash.String(), block.Hash().String()))
+		}
+
+		if i != block.Height() {
+			panic(fmt.Sprintf("about to connect the wrong block: wanted %d, got %d (%s)",
+				i, block.Height(), block.Hash().String()))
+		}
+
 		// Advance stakedb height, which should always be less than or equal to
 		// SQLite height, except when SQLite is empty since stakedb always has
 		// genesis, as enforced by the rewinding code in this function.
@@ -240,7 +297,7 @@ func (db *wiredDB) resyncDB(ctx context.Context, blockGetter rpcutils.BlockGette
 				panic(fmt.Sprintf("about to connect the wrong block: %d, %d", i, db.sDB.Height()))
 			}
 			if err = db.sDB.ConnectBlock(block); err != nil {
-				return i - 1, err
+				return i - 1, db.supplementUnknownTicketError(err)
 			}
 		}
 		stakeDBHeight = int64(db.sDB.Height()) // i
@@ -255,21 +312,6 @@ func (db *wiredDB) resyncDB(ctx context.Context, blockGetter rpcutils.BlockGette
 				}
 				log.Infof("Scanning blocks %d to %d (%d live)...",
 					i, endRangeBlock, db.sDB.PoolSize())
-
-				// If updateStatusSync is set to true then this is the only way that sync progress will be updated.
-				if barLoad != nil && db.updateStatusSync {
-					timeTakenPerBlock := (time.Since(timeStart).Seconds() / float64(endRangeBlock-i))
-
-					barLoad <- &dbtypes.ProgressBarLoad{
-						From:      i,
-						To:        height,
-						Timestamp: int64(timeTakenPerBlock * float64(height-endRangeBlock)), //timeToComplete
-						Msg:       InitialLoadSyncStatusMsg,
-						BarID:     dbtypes.InitialDBLoad,
-					}
-
-					timeStart = time.Now()
-				}
 			}
 		}
 
@@ -303,7 +345,7 @@ func (db *wiredDB) resyncDB(ctx context.Context, blockGetter rpcutils.BlockGette
 			Hash:       blockhash.String(),
 			Difficulty: diffRatio,
 			StakeDiff:  fnoutil.Amount(header.SBits).ToCoin(),
-			Time:       header.Timestamp.Unix(),
+			Time:       apitypes.TimeAPI{S: dbtypes.NewTimeDef(header.Timestamp)},
 			PoolInfo:   tpi,
 		}
 
@@ -325,7 +367,9 @@ func (db *wiredDB) resyncDB(ctx context.Context, blockGetter rpcutils.BlockGette
 		}
 
 		// Stake info
-		si := apitypes.StakeInfoExtended{}
+		si := apitypes.StakeInfoExtended{
+			Hash: blockSummary.Hash,
+		}
 
 		// Ticket fee info
 		fib := txhelpers.FeeRateInfoBlock(block)
@@ -347,9 +391,9 @@ func (db *wiredDB) resyncDB(ctx context.Context, blockGetter rpcutils.BlockGette
 		}
 		stakeInfoHeight = i
 
-		// If updating explore is activated, update it at intervals of 200 blocks.
-		if updateExplorer != nil && i%200 == 0 && explorer.SyncExplorerUpdateStatus() && db.updateStatusSync {
-			updateExplorer <- &blockhash
+		// Update API status and explorer page, if explorer updates are enabled.
+		if i%100 == 0 {
+			// API status
 			select {
 			case db.updateStatusChan <- uint32(i):
 			default:
@@ -360,16 +404,13 @@ func (db *wiredDB) resyncDB(ctx context.Context, blockGetter rpcutils.BlockGette
 		if _, height, err = db.client.GetBestBlock(); err != nil {
 			return i, fmt.Errorf("rpcclient.GetBestBlock failed: %v", err)
 		}
-	}
+	} // for i := startHeight ...
 
-	if barLoad != nil && db.updateStatusSync {
-		barLoad <- &dbtypes.ProgressBarLoad{
-			From:     height,
-			To:       height,
-			Msg:      InitialLoadSyncStatusMsg,
-			BarID:    dbtypes.InitialDBLoad,
-			Subtitle: "sync complete",
-		}
+	// Update the DB height with the API status.
+	select {
+	case db.updateStatusChan <- uint32(height):
+	default:
+		log.Errorf("Failed to update DB height with API status. Is StatusNtfnHandler started?")
 	}
 
 	log.Infof("Rescan finished successfully at height %d.", height)
@@ -390,7 +431,7 @@ func (db *wiredDB) resyncDB(ctx context.Context, blockGetter rpcutils.BlockGette
 	return height, nil
 }
 
-func (db *wiredDB) getBlock(ind int64) (*fnoutil.Block, *chainhash.Hash, error) {
+func (db *WiredDB) getBlock(ind int64) (*fnoutil.Block, *chainhash.Hash, error) {
 	blockhash, err := db.client.GetBlockHash(ind)
 	if err != nil {
 		return nil, nil, fmt.Errorf("GetBlockHash(%d) failed: %v", ind, err)
@@ -404,4 +445,53 @@ func (db *wiredDB) getBlock(ind int64) (*fnoutil.Block, *chainhash.Hash, error) 
 	block := fnoutil.NewBlock(msgBlock)
 
 	return block, blockhash, nil
+}
+
+// ImportSideChains imports all side chains. Similar to pgblockchain.MissingSideChainBlocks
+// plus the rest from main.go
+func (db *WiredDB) ImportSideChains(collector *blockdata.Collector) error {
+	tips, err := rpcutils.SideChains(db.client)
+	if err != nil {
+		return err
+	}
+	var hashlist []*chainhash.Hash
+	for it := range tips {
+		log.Tracef("Primary DB -> Getting base DB side chain with tip %s at %d.", tips[it].Hash, tips[it].Height)
+		sideChain, err := rpcutils.SideChainFull(db.client, tips[it].Hash)
+		if err != nil {
+			log.Errorf("Primary DB -> Unable to get side chain blocks for chain tip %s: %v", tips[it].Hash, err)
+			return err
+		}
+
+		// For each block in the side chain, check if it already stored.
+		for is := range sideChain {
+			// Check for the block hash in the DB.
+			isMainchainNow, err := db.getMainchainStatus(sideChain[is])
+			if isMainchainNow || err == sql.ErrNoRows {
+				blockhash, err := chainhash.NewHashFromStr(sideChain[is])
+				if err != nil {
+					log.Errorf("Primary DB -> Invalid block hash %s: %v.", blockhash, err)
+					continue
+				}
+				hashlist = append(hashlist, blockhash)
+			}
+		}
+	}
+	log.Infof("Primary DB -> %d new sidechain block(s) to import", len(hashlist))
+	for _, blockhash := range hashlist {
+		// Collect block data.
+		blockDataBasic, _ := collector.CollectAPITypes(blockhash)
+		log.Debugf("Primary DB -> Importing block %s (height %d) into primary DB.",
+			blockhash.String(), blockDataBasic.Height)
+		if blockDataBasic == nil {
+			// Do not quit if unable to collect side chain block data.
+			log.Error("Primary DB -> Unable to collect data for side chain block %s", blockhash.String())
+			continue
+		}
+		err := db.StoreSideBlockSummary(blockDataBasic)
+		if err != nil {
+			log.Errorf("Primary DB -> Failed to store block %s", blockhash.String())
+		}
+	}
+	return nil
 }
