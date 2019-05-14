@@ -6,7 +6,7 @@ require (
 	github.com/DataDog/zstd v1.3.8 // indirect
 	github.com/Sereal/Sereal v0.0.0-20190416075407-a9d24ede505a // indirect
 	github.com/asdine/storm v2.2.0+incompatible
-	github.com/fonero-project/politeia v0.0.0-20190514145649-d193400e2405
+	github.com/fonero-project/politeia v0.0.0-20190514170232-634b3aa51cbe
 	github.com/decred/slog v1.0.0
 	github.com/golang/protobuf v1.3.1 // indirect
 	github.com/golang/snappy v0.0.1 // indirect
