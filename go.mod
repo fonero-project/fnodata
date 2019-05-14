@@ -10,25 +10,6 @@ require (
 	github.com/dmigwi/go-piparser/proposals v0.0.0-20190426030541-8412e0f44f55
 	github.com/dustin/go-humanize v1.0.0
 	github.com/fonero-project/fnod v0.0.0-20190514051128-48e51dacc4c3
-	github.com/fonero-project/fnodata/api/types v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/blockdata v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/db/cache v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/db/dbtypes v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/db/fnopg v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/db/fnosqlite v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/exchanges v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/explorer/types v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/fnorates v0.0.0-20190514104637-d305910f7b04 // indirect
-	github.com/fonero-project/fnodata/gov/agendas v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/gov/politeia v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/mempool v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/middleware v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/pubsub v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/pubsub/types v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/rpcutils v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/semver v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/stakedb v0.0.0-20190514104637-d305910f7b04
-	github.com/fonero-project/fnodata/txhelpers v0.0.0-20190514104637-d305910f7b04
 	github.com/fonero-project/fnowallet v0.0.0-20190514102610-e703aeeabc44
 	github.com/go-chi/chi v4.0.3-0.20190316151245-d08916613452+incompatible
 	github.com/google/gops v0.3.5
