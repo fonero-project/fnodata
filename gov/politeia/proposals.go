@@ -20,7 +20,7 @@ import (
 	"github.com/fonero-project/fnodata/gov/politeia/piclient"
 	pitypes "github.com/fonero-project/fnodata/gov/politeia/types"
 	"github.com/fonero-project/fnodata/semver"
-	piapi "github.com/decred/politeia/politeiawww/api/www/v1"
+	piapi "github.com/fonero-project/politeia/politeiawww/api/www/v1"
 )
 
 var (

@@ -3,10 +3,10 @@
 
 package types
 
-import piapi "github.com/decred/politeia/politeiawww/api/www/v1"
+import piapi "github.com/fonero-project/politeia/politeiawww/api/www/v1"
 
 // ProposalInfo holds the proposal details as document here
-// https://github.com/decred/politeia/blob/master/politeiawww/api/www/v1/api.md#user-proposals.
+// https://github.comfonero-project/politeia/blob/master/politeiawww/api/www/v1/api.md#user-proposals.
 // It also holds the votes status details. The ID field is auto incremented by
 // the db.
 type ProposalInfo struct {
@@ -46,7 +46,7 @@ type Proposal struct {
 }
 
 // CensorshipRecord is an entry that was created when the proposal was submitted.
-// https://github.com/decred/politeia/blob/master/politeiawww/api/www/v1/api.md#censorship-record
+// https://github.com/fonero-project/politeia/blob/master/politeiawww/api/www/v1/api.md#censorship-record
 type CensorshipRecord struct {
 	TokenVal   string `json:"token" storm:"unique"`
 	MerkleRoot string `json:"merkle"`
@@ -54,7 +54,7 @@ type CensorshipRecord struct {
 }
 
 // AttachmentFile are files and documents submitted as proposal details.
-// https://github.com/decred/politeia/blob/master/politeiawww/api/www/v1/api.md#file
+// https://github.com/fonero-project/politeia/blob/master/politeiawww/api/www/v1/api.md#file
 type AttachmentFile struct {
 	Name      string `json:"name"`
 	MimeType  string `json:"mime"`
@@ -63,7 +63,7 @@ type AttachmentFile struct {
 }
 
 // ProposalVotes defines the proposal status(Votes infor for the public proposals).
-// https://github.com/decred/politeia/blob/master/politeiawww/api/www/v1/api.md#proposal-vote-status
+// https://github.com/fonero-project/politeia/blob/master/politeiawww/api/www/v1/api.md#proposal-vote-status
 type ProposalVotes struct {
 	Token              string         `json:"token"`
 	VoteStatus         VoteStatusType `json:"status"`
@@ -94,7 +94,7 @@ type VoteOption struct {
 }
 
 // ProposalStatusType defines the various proposal statuses available as referenced
-// in https://github.com/decred/politeia/blob/master/politeiawww/api/www/v1/v1.go
+// in https://github.com/fonero-project/politeia/blob/master/politeiawww/api/www/v1/v1.go
 type ProposalStatusType piapi.PropStatusT
 
 func (p ProposalStatusType) String() string {
@@ -102,7 +102,7 @@ func (p ProposalStatusType) String() string {
 }
 
 // VoteStatusType defines the various vote statuses available as referenced in
-// https://github.com/decred/politeia/blob/master/politeiawww/api/www/v1/v1.go
+// https://github.com/fonero-project/politeia/blob/master/politeiawww/api/www/v1/v1.go
 type VoteStatusType piapi.PropVoteStatusT
 
 // ShorterDesc maps the short description to there respective vote status type.

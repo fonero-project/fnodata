@@ -13,7 +13,7 @@ import (
 
 	"github.com/asdine/storm"
 	pitypes "github.com/fonero-project/fnodata/gov/politeia/types"
-	piapi "github.com/decred/politeia/politeiawww/api/www/v1"
+	piapi "github.com/fonero-project/politeia/politeiawww/api/www/v1"
 )
 
 var db *storm.DB
