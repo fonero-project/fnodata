@@ -1,6 +1,6 @@
 # Code of Conduct
 
-If you participate in the fnodata.org community, we ask that you be mindful of
+If you participate in the fonero.org community, we ask that you be mindful of
 how your behavior might affect others, and consider the following guidelines.
 
 ## Please
@@ -22,7 +22,7 @@ how your behavior might affect others, and consider the following guidelines.
   frustration now and then, but we cannot allow that frustration to turn into a
   personal attack. It’s important to remember that a community where people feel
   uncomfortable or threatened is not a productive one. Members of the
-  fnodata.org community should be respectful when dealing with other members and
+  fonero.org community should be respectful when dealing with other members and
   people outside the community.
 * **Be careful in the words that you choose.** We are a community of
   professionals, and we conduct ourselves professionally. Be kind to others. Do
