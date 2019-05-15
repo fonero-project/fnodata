@@ -79,8 +79,8 @@ var (
 	defaultDisabledExchanges = "huobi,dragonex"
 	defaultRateCertFile      = filepath.Join(defaultHomeDir, "rpc.cert")
 
-	defaultMainnetLink = "https://explorer.fnodata.org/"
-	defaultTestnetLink = "https://testnet.fnodata.org/"
+	defaultMainnetLink = "https://explorer.fonero.org/"
+	defaultTestnetLink = "https://testnet.fonero.org/"
 
 	maxSyncStatusLimit = 5000
 )
