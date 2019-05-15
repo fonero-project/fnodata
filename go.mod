@@ -9,8 +9,6 @@ require (
 	github.com/didip/tollbooth_chi v0.0.0-20170928041846-6ab5f3083f3d
 	github.com/dmigwi/go-piparser/proposals v0.0.0-20190426030541-8412e0f44f55
 	github.com/dustin/go-humanize v1.0.0
-	github.com/fonero-project/fnod v0.0.0-20190514051128-48e51dacc4c3
-	github.com/fonero-project/fnowallet v0.0.0-20190514102610-e703aeeabc44
 	github.com/go-chi/chi v4.0.3-0.20190316151245-d08916613452+incompatible
 	github.com/google/gops v0.3.5
 	github.com/googollee/go-engine.io v0.0.0-20180829091931-e2f255711dcb // indirect
